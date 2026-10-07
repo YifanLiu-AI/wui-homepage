@@ -34,11 +34,15 @@
     <link rel="stylesheet" href="./assets/css/publications-no-dark-mode.css">
     {% endif %}
     <link rel="stylesheet" href="{{ '/assets/css/home.css?v=20260917-47' | relative_url }}">
+    {% comment %}
     <link rel="stylesheet" href="{{ '/assets/css/robot-companion.css?v=44' | relative_url }}">
+    {% endcomment %}
 
   </head>
   <body class="op-home">
+    {% comment %}
     <div class="robot-companion" aria-hidden="true"></div>
+    {% endcomment %}
     <div class="wrapper">
       <div class="home-hero">
         <div class="hero-identity">
@@ -60,9 +64,11 @@
       </section>
     </div>
     <script src="{{ "/assets/js/scale.fix.js" | relative_url }}"></script>
-    <script type="module" src="{{ '/assets/js/page-interactions.js?v=56' | relative_url }}"></script>
+    <script type="module" src="{{ '/assets/js/page-interactions.js?v=45' | relative_url }}"></script>
+    {% comment %}
     <script type="importmap">{"imports":{"three":"{{ '/assets/js/vendor/three/three.module.min.js' | relative_url }}"}}</script>
-    <script type="module" src="{{ '/assets/js/robot-companion.js?v=56' | relative_url }}"></script>
+    <script type="module" src="{{ '/assets/js/robot-companion.js?v=55' | relative_url }}"></script>
+    {% endcomment %}
     {% if site.google_analytics %}
     <script>
       (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){

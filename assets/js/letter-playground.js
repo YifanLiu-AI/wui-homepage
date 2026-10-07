@@ -32,9 +32,6 @@ export async function createLetterPlayground({ scene, camera, container, arms, w
   let nextAction = Infinity;
   let nextAssignment = 0;
   let disposed = false;
-  let reachQueue = Promise.resolve();
-  let assignmentPending = false;
-  let interactionRevision = 0;
   let hoverPointer = null;
   const hero = document.querySelector('.home-hero');
   const armBounds = arms.map(arm => new THREE.Box3().setFromObject(arm.model, true));
@@ -75,7 +72,6 @@ export async function createLetterPlayground({ scene, camera, container, arms, w
     const item = { letter, mesh, body, home, size, heightScale, sway: 0, swayVelocity: 0 };
     mesh.userData.item = item;
     items.push(item);
-    await new Promise(resolve => setTimeout(resolve, 0));
   }
   const letters = items;
   const wordWidth = letters.reduce((sum, item) => sum + item.size.x, 0) + 0.014 * 4 + 0.015;
@@ -109,7 +105,6 @@ export async function createLetterPlayground({ scene, camera, container, arms, w
     item.body.wakeUp();
   }
   function cancelJob() {
-    interactionRevision++;
     for (const task of jobs) if (task?.held) settle(task.item);
     jobs.fill(null);
     job = null;
@@ -134,21 +129,7 @@ export async function createLetterPlayground({ scene, camera, container, arms, w
   }
   const jawClearance = 0.012;
   // Check the same open and closed tool frames used by the pickup and placement.
-  async function solveReach(index, point, yaw, offset) {
-    if (globalThis.scheduler?.yield) await globalThis.scheduler.yield();
-    else await new Promise(resolve => setTimeout(resolve, 0));
-    if (disposed) return false;
-    const arm = arms[index];
-    const previous = arm.graspFrame.position.x;
-    arm.graspFrame.position.x = offset;
-    try {
-      reachSolvers[index](point, yaw);
-      return reachSolvers[index].reachable;
-    } finally {
-      arm.graspFrame.position.x = previous;
-    }
-  }
-  async function reachableArm(item, position, rotation = item.body.quaternion) {
+  function reachableArm(item, position, rotation = item.body.quaternion) {
     const spec = graspSpec(item);
     const q = new THREE.Quaternion().copy(rotation);
     const point = spec.point.clone().applyQuaternion(q).add(position);
@@ -157,42 +138,45 @@ export async function createLetterPlayground({ scene, camera, container, arms, w
     const order = position.x < 0 ? [0, 1] : [1, 0];
     for (const index of order) {
       const arm = arms[index];
-      const closedOffset = -spec.width / (2 * arm.base.scale.x);
-      const openOffset = -(spec.width + jawClearance) / (2 * arm.base.scale.x);
-      let valid = await solveReach(index, point, yaw, closedOffset);
+      const previous = arm.graspFrame.position.x;
+      arm.graspFrame.position.x = -spec.width / (2 * arm.base.scale.x);
+      const solver = reachSolvers[index];
+      solver(point, yaw);
+      let valid = solver.reachable;
       if (valid) {
-        valid = await solveReach(index, point.clone().setZ(0.095), yaw, closedOffset);
+        solver(point.clone().setZ(0.095), yaw);
+        valid = solver.reachable;
       }
       if (valid) {
-        valid = await solveReach(index, spec.point.clone().add(item.home), item.letter === 'A' ? -0.3 : 0, closedOffset);
+        solver(spec.point.clone().add(item.home), item.letter === 'A' ? -0.3 : 0);
+        valid = solver.reachable;
       }
       if (valid) {
-        valid = await solveReach(index, spec.point.clone().add(item.home).setZ(0.095), item.letter === 'A' ? -0.3 : 0, closedOffset);
+        solver(spec.point.clone().add(item.home).setZ(0.095), item.letter === 'A' ? -0.3 : 0);
+        valid = solver.reachable;
+      }
+      arm.graspFrame.position.x = -(spec.width + jawClearance) / (2 * arm.base.scale.x);
+      if (valid) {
+        solver(point, yaw);
+        valid = solver.reachable;
       }
       if (valid) {
-        valid = await solveReach(index, point, yaw, openOffset);
+        solver(point.clone().setZ(0.085), yaw);
+        valid = solver.reachable;
       }
-      if (valid) {
-        valid = await solveReach(index, point.clone().setZ(0.085), yaw, openOffset);
-      }
+      arm.graspFrame.position.x = previous;
       if (valid) return index;
     }
     return -1;
   }
-  function queueReach(operation) {
-    const result = reachQueue.then(operation);
-    reachQueue = result.catch(error => console.warn('Reachability check failed:', error.message));
-    return result;
-  }
-  async function constrainPlacement(item, requested, valid = () => true) {
+  function constrainPlacement(item, requested) {
     const start = new THREE.Vector3().copy(item.body.position);
-    if (await reachableArm(item, requested) >= 0) return requested;
+    if (reachableArm(item, requested) >= 0) return requested;
     let low = 0, high = 1;
     for (let iteration = 0; iteration < 7; iteration++) {
-      if (!valid()) return start;
       const middle = (low + high) / 2;
       const candidate = start.clone().lerp(requested, middle);
-      if (await reachableArm(item, candidate) >= 0) low = middle;
+      if (reachableArm(item, candidate) >= 0) low = middle;
       else high = middle;
     }
     return start.lerp(requested, low);
@@ -300,24 +284,12 @@ export async function createLetterPlayground({ scene, camera, container, arms, w
     }
     if (event.pointerId !== drag.id || !ray.ray.intersectPlane(plane, hitPoint)) return;
     hitPoint.add(drag.offset);
-    drag.requested = hitPoint.clone();
-    if (drag.checking) return;
-    const currentDrag = drag;
-    currentDrag.checking = true;
-    queueReach(async () => {
-      while (!disposed && drag === currentDrag && currentDrag.requested) {
-        const requested = currentDrag.requested;
-        currentDrag.requested = null;
-        const allowed = await constrainPlacement(currentDrag.item, requested, () => drag === currentDrag && !disposed);
-        if (drag !== currentDrag || disposed) return;
-        currentDrag.item.body.position.set(allowed.x, allowed.y, currentDrag.item.home.z + currentDrag.item.size.z + 0.006);
-        wake();
-      }
-    }).finally(() => { currentDrag.checking = false; });
+    const allowed = constrainPlacement(drag.item, hitPoint);
+    drag.item.body.position.set(allowed.x, allowed.y, drag.item.home.z + drag.item.size.z + 0.006);
+    wake();
   });
   function release() {
     if (!drag) return;
-    interactionRevision++;
     settle(drag.item);
     drag = null;
     hero.classList.remove('is-dragging');
@@ -332,30 +304,16 @@ export async function createLetterPlayground({ scene, camera, container, arms, w
 
   function update(now, dt) {
     if (disposed) return false;
-    if (enabled && !reducedMotion.matches && !drag && !assignmentPending && now > nextAction && now > nextAssignment) {
+    if (enabled && !reducedMotion.matches && !drag && now > nextAction && now > nextAssignment) {
       nextAssignment = now + 500;
-      assignmentPending = true;
-      const revision = interactionRevision;
-      queueReach(async () => {
-        const valid = () => !disposed && !drag && enabled && !reducedMotion.matches && revision === interactionRevision;
-        for (const [index, arm] of arms.entries()) {
-          if (!valid()) return;
-          if (jobs[index]) continue;
-          const candidates = [];
-          for (const item of items) {
-            if (!valid()) return;
-            if (!dirty(item) || jobs.some(task => task?.item === item)) continue;
-            const position = new THREE.Vector3().copy(item.body.position);
-            const reachable = await reachableArm(item, position);
-            if (!valid()) return;
-            if (reachable === index && position.distanceTo(item.body.position) < 0.003) candidates.push(item);
-          }
-          candidates.sort((a, b) => Math.abs(a.body.position.x - arm.base.position.x) - Math.abs(b.body.position.x - arm.base.position.x));
-          const misplaced = nextLetter(candidates, performance.now(), jobs.some(Boolean));
-          if (misplaced) startJob(misplaced, false, performance.now(), index);
-        }
-        if (!jobs.some(Boolean) && !items.some(dirty)) nextAction = Infinity;
-      }).finally(() => { assignmentPending = false; wake(); });
+      for (const [index, arm] of arms.entries()) {
+        if (jobs[index]) continue;
+        const candidates = items.filter(item => dirty(item) && !jobs.some(task => task?.item === item) && reachableArm(item, new THREE.Vector3().copy(item.body.position)) === index)
+          .sort((a, b) => Math.abs(a.body.position.x - arm.base.position.x) - Math.abs(b.body.position.x - arm.base.position.x));
+        const misplaced = nextLetter(candidates, now, jobs.some(Boolean));
+        if (misplaced) startJob(misplaced, false, now, index);
+      }
+      if (!jobs.some(Boolean) && !items.some(dirty)) nextAction = Infinity;
     }
     for (const task of jobs) {
       if (!task) continue;
@@ -430,20 +388,9 @@ export async function createLetterPlayground({ scene, camera, container, arms, w
       if (age >= duration && hand.distanceTo(destination) < (phase === 'place' ? 0.005 : phase === 'descend' ? 0.003 : 0.018) && (push || !['descend', 'close'].includes(phase) || pointingDown) && (phase !== 'close' || contact)) {
         if (phase === 'approach') transition('descend', now);
         else if (phase === 'descend' && push) {
-          if (!task.placementPending) {
-            task.placementPending = true;
-            const start = new THREE.Vector3(pos.x, pos.y, pos.z);
-            const origin = hand.clone();
-            queueReach(() => constrainPlacement(item, start.clone().add(new THREE.Vector3(0.035, 0.012, 0))))
-              .then(displaced => {
-                if (jobs[task.index] !== task || disposed) return;
-                task.pushEnd = origin.add(displaced.sub(start));
-                task.phase = 'push';
-                task.start = performance.now();
-                task.arm.graspFrame.getWorldPosition(task.from);
-                wake();
-              });
-          }
+          const displaced = constrainPlacement(item, new THREE.Vector3(pos.x + 0.035, pos.y + 0.012, pos.z));
+          job.pushEnd = hand.clone().add(displaced.sub(new THREE.Vector3(pos.x, pos.y, pos.z)));
+          transition('push', now);
         } else if (phase === 'descend') {
           arm.desired.gripper = gripperOpening(arm, job.strokeWidth);
           transition('close', now);
