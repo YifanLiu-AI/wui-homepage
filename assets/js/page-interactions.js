@@ -6,14 +6,24 @@ cursor.className = 'cursor-dot';
 cursor.setAttribute('aria-hidden', 'true');
 document.body.append(cursor);
 const finePointer = matchMedia('(hover: hover) and (pointer: fine)');
+let cursorFrame = 0;
+let cursorPointer = null;
 function hideCursor() {
+  cancelAnimationFrame(cursorFrame);
+  cursorFrame = 0;
+  cursorPointer = null;
   document.body.classList.remove('has-dot-cursor');
 }
 document.addEventListener('pointermove', event => {
   if (!finePointer.matches || event.pointerType === 'touch') return hideCursor();
-  cursor.style.transform = `translate3d(${event.clientX}px, ${event.clientY}px, 0)`;
-  cursor.classList.toggle('is-interactive', !!event.target.closest('a, button, .keyword-highlight'));
-  document.body.classList.add('has-dot-cursor');
+  cursorPointer = { x: event.clientX, y: event.clientY, interactive: !!event.target.closest('a, button, .keyword-highlight') };
+  if (cursorFrame) return;
+  cursorFrame = requestAnimationFrame(() => {
+    cursorFrame = 0;
+    cursor.style.transform = `translate3d(${cursorPointer.x}px, ${cursorPointer.y}px, 0)`;
+    cursor.classList.toggle('is-interactive', cursorPointer.interactive);
+    document.body.classList.add('has-dot-cursor');
+  });
 }, { passive: true });
 document.addEventListener('pointerdown', () => cursor.classList.add('is-pressed'), { passive: true });
 document.addEventListener('pointerup', () => cursor.classList.remove('is-pressed'), { passive: true });

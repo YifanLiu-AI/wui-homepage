@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { createLetterPlayground } from './letter-playground.js?v=55';
+import { createLetterPlayground } from './letter-playground.js?v=56';
 import { mountPalettePicker } from './scene-palettes.js?v=46';
 import URDFLoader from './vendor/urdf-loader.js';
 import { STLLoader } from './vendor/stl-loader.js';
@@ -12,11 +12,12 @@ if (host) mountRobot(host).catch((error) => {
 
 async function mountRobot(container) {
   const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, powerPreference: 'low-power' });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1));
   renderer.setClearColor(0xffffff, 0);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.autoUpdate = false;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.25;
   container.append(renderer.domElement);
@@ -31,7 +32,7 @@ async function mountRobot(container) {
   scene.add(new THREE.HemisphereLight(0xffffff, 0x8c8c8c, 0.9));
   const light = new THREE.PointLight(0xffffff, 7, 0, 2);
   light.castShadow = true;
-  light.shadow.mapSize.set(1024, 1024);
+  light.shadow.mapSize.set(512, 512);
   Object.assign(light.shadow.camera, { near: 0.05, far: 12 });
   light.shadow.bias = -0.0005;
   light.shadow.normalBias = 0.001;
@@ -57,11 +58,15 @@ async function mountRobot(container) {
   const stl = new STLLoader();
   if ('DecompressionStream' in window) loader.loadMeshCb = (url, loadingManager, done) => {
     loadingManager.itemStart(url);
-    if (!meshes.has(url)) meshes.set(url, fetch(url + '.gz')
+    if (!meshes.has(url)) meshes.set(url, fetch(url.replace(/\.stl$/, '.preview.stl.gz'))
       .then(response => {
         if (!response.ok) throw new Error('Compressed mesh unavailable');
         return new Response(response.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
       })
+      .catch(() => fetch(url + '.gz').then(response => {
+        if (!response.ok) throw new Error('Compressed mesh unavailable');
+        return new Response(response.body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+      }))
       .catch(() => fetch(url).then(response => {
         if (!response.ok) throw new Error('Mesh unavailable');
         return response.arrayBuffer();
@@ -81,25 +86,26 @@ async function mountRobot(container) {
   if (!robot) throw new Error('SO-101 model is missing');
   meshes.clear();
   const materials = new Map();
-  robot.traverse((object) => {
-    if (object.isMesh) {
-      object.castShadow = true;
-      object.receiveShadow = true;
-      const original = object.material;
-      const key = original.color.getHex();
-      if (!materials.has(key)) materials.set(key, new THREE.MeshStandardMaterial({
-        color: 0x92969a,
-        roughness: 0.42, metalness: 0.32,
-      }));
-      object.material = materials.get(key);
-      original.dispose();
-      const edgeMaterial = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.78, toneMapped: false });
-      const edgeLines = new THREE.LineSegments(new THREE.EdgesGeometry(object.geometry, 32), edgeMaterial);
-      edgeLines.name = 'soft-white-edge';
-      edgeLines.renderOrder = 2;
-      object.add(edgeLines);
-    }
-  });
+  const robotMeshes = [];
+  robot.traverse(object => { if (object.isMesh) robotMeshes.push(object); });
+  for (const object of robotMeshes) {
+    object.castShadow = true;
+    object.receiveShadow = true;
+    const original = object.material;
+    const key = original.color.getHex();
+    if (!materials.has(key)) materials.set(key, new THREE.MeshStandardMaterial({
+      color: 0x92969a,
+      roughness: 0.42, metalness: 0.32,
+    }));
+    object.material = materials.get(key);
+    original.dispose();
+    const edgeMaterial = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.78, toneMapped: false });
+    const edgeLines = new THREE.LineSegments(new THREE.EdgesGeometry(object.geometry, 60), edgeMaterial);
+    edgeLines.name = 'soft-white-edge';
+    edgeLines.renderOrder = 2;
+    object.add(edgeLines);
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
   // The challenge USD uses a different base frame from the original SO-101 URDF.
   robot.rotation.z = -Math.PI / 2;
   robot.position.set(0.0207909, 0.0157608, 0.0324817);
@@ -171,6 +177,11 @@ async function mountRobot(container) {
   const avatar = document.querySelector('.profile-avatar');
   const lightRay = new THREE.Raycaster();
   let lightPointer = null;
+  let lightDirty = true;
+  let resizePending = false;
+  let renderWidth = 0;
+  let renderHeight = 0;
+  let lastShadowTime = -Infinity;
   function updateLight() {
     if (!avatar) return;
     const rect = avatar.getBoundingClientRect();
@@ -216,6 +227,14 @@ async function mountRobot(container) {
   function animate(now) {
     frame = 0;
     if (!visible || document.hidden) return;
+    if (resizePending) {
+      resizePending = false;
+      resize();
+    }
+    if (lightDirty) {
+      lightDirty = false;
+      updateLight();
+    }
     const dt = Math.min((now - lastTime) / 1000 || 1 / 60, 0.05);
     lastTime = now;
     let jointsMoving = false;
@@ -238,6 +257,10 @@ async function mountRobot(container) {
       arm.model.setJointValues({ shoulder_lift: arm.current.shoulder_lift + sway.angle, elbow_flex: arm.current.elbow_flex - sway.angle * 0.65, wrist_flex: arm.current.wrist_flex + sway.angle * 0.3 });
     });
     if (shadowMaterial.userData.shader) renderer.getDrawingBufferSize(shadowMaterial.userData.shader.uniforms.viewportSize.value);
+    if (now - lastShadowTime >= 50) {
+      renderer.shadowMap.needsUpdate = true;
+      lastShadowTime = now;
+    }
     renderer.render(scene, camera);
     for (const arm of arms) arm.model.setJointValues(arm.current);
     scene.updateMatrixWorld(true);
@@ -249,7 +272,7 @@ async function mountRobot(container) {
   }
   function wake() {
     clearTimeout(idleWake);
-    activeUntil = performance.now() + 500;
+    activeUntil = performance.now() + 50;
     if (!frame && visible && !document.hidden) {
       lastTime = performance.now();
       frame = requestAnimationFrame(animate);
@@ -321,7 +344,16 @@ async function mountRobot(container) {
     camera.bottom = camera.top - container.clientHeight * unitsPerPixel;
     camera.updateProjectionMatrix();
     updateLight();
-    renderer.setSize(container.clientWidth, container.clientHeight, false);
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+    if (width !== renderWidth || height !== renderHeight) {
+      renderWidth = width;
+      renderHeight = height;
+      renderer.setSize(width, height, false);
+    }
+  }
+  function scheduleResize() {
+    resizePending = true;
     wake();
   }
   playground = await createLetterPlayground({ scene, camera, container, arms, wake, reducedMotion });
@@ -340,12 +372,12 @@ async function mountRobot(container) {
     wake();
   });
   resize();
-  new ResizeObserver(resize).observe(container);
-  new ResizeObserver(resize).observe(hero);
-  window.addEventListener('scroll', resize, { passive: true });
+  new ResizeObserver(scheduleResize).observe(container);
+  new ResizeObserver(scheduleResize).observe(hero);
+  window.addEventListener('scroll', scheduleResize, { passive: true });
   function followPointer(event) {
     lightPointer = { x: event.clientX, y: event.clientY };
-    updateLight();
+    lightDirty = true;
     wake();
   }
   document.addEventListener('pointermove', followPointer, { passive: true });
@@ -378,9 +410,9 @@ async function mountRobot(container) {
     if (event.deltaY < 0 && element.scrollTop <= 1) swingAtEdge(-1, speed);
     if (event.deltaY > 0 && element.scrollTop >= end - 1) swingAtEdge(1, speed);
   }, { passive: true });
-  document.querySelector('.homepage-content').addEventListener('scroll', () => { updateLight(); wake(); }, { passive: true });
-  if (avatar) new ResizeObserver(() => { updateLight(); wake(); }).observe(avatar);
-  document.fonts.ready.then(() => { updateLight(); wake(); });
+  document.querySelector('.homepage-content').addEventListener('scroll', () => { lightDirty = true; wake(); }, { passive: true });
+  if (avatar) new ResizeObserver(() => { lightDirty = true; wake(); }).observe(avatar);
+  document.fonts.ready.then(scheduleResize);
   new IntersectionObserver(([entry]) => {
     visible = entry.isIntersecting;
     if (visible) wake();
