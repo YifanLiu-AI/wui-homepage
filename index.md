@@ -1,5 +1,5 @@
 ---
-layout: homepage
+layout: redirect-home
 ---
 
 <p class="section-label">About</p>
